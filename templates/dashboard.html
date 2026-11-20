@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sales Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#f4f6fa; --card:#fff; --text:#1f2937; --muted:#6b7280; --accent:#4f46e5; --border:#e5e7eb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111827; --card:#1f2937; --text:#f3f4f6; --muted:#9ca3af; --border:#374151; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:18px 24px 6px; }
+  h1 { margin:0; font-size:22px; }
+  .sub { color:var(--muted); font-size:13px; }
+  .filters { display:flex; flex-wrap:wrap; gap:12px; padding:12px 24px; align-items:end; }
+  .filters label { display:flex; flex-direction:column; font-size:12px; color:var(--muted); gap:4px; }
+  select,input,button { padding:7px 10px; border:1px solid var(--border); border-radius:6px; background:var(--card); color:var(--text); font-size:14px; }
+  button { background:var(--accent); color:#fff; border:none; cursor:pointer; }
+  .grid { display:grid; gap:16px; padding:16px 24px 24px; grid-template-columns:repeat(auto-fit,minmax(330px,1fr)); }
+  .kpis { display:grid; gap:16px; padding:0 24px; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; }
+  .kpi .v { font-size:26px; font-weight:700; margin-top:4px; }
+  .kpi .l { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .kpi .n { font-size:11px; color:var(--muted); }
+  .card h3 { margin:0 0 10px; font-size:15px; }
+  .wide { grid-column:1 / -1; }
+  canvas { max-height:300px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  td,th { text-align:left; padding:7px 4px; border-bottom:1px solid var(--border); }
+  td:last-child,th:last-child { text-align:right; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Sales Dashboard</h1>
+  <div class="sub">Customers + Orders joined on Customer_ID · Revenue uses Net_Amount_INR (cancelled = ₹0)</div>
+</header>
+
+<div class="filters">
+  <label>From <input type="date" id="start"></label>
+  <label>To <input type="date" id="end"></label>
+  <label>Category <select id="category"></select></label>
+  <label>Segment <select id="segment"></select></label>
+  <label>City <select id="city"></select></label>
+  <label>Order status <select id="status"></select></label>
+  <button id="reset">Reset</button>
+</div>
+
+<div class="kpis">
+  <div class="card kpi"><div class="l">Total net revenue</div><div class="v" id="k-rev">–</div></div>
+  <div class="card kpi"><div class="l">Total orders</div><div class="v" id="k-ord">–</div><div class="n" id="k-act"></div></div>
+  <div class="card kpi"><div class="l">Unique customers</div><div class="v" id="k-cus">–</div></div>
+  <div class="card kpi"><div class="l">Avg order value</div><div class="v" id="k-aov">–</div><div class="n">per non-cancelled order</div></div>
+  <div class="card kpi"><div class="l">Repeat customers</div><div class="v" id="k-rep">–</div><div class="n">2+ non-cancelled orders</div></div>
+</div>
+
+<div class="grid">
+  <div class="card wide"><h3>Monthly revenue trend</h3><canvas id="c-month"></canvas></div>
+  <div class="card"><h3>Revenue by product category</h3><canvas id="c-cat"></canvas></div>
+  <div class="card"><h3>Revenue by customer segment</h3><canvas id="c-seg"></canvas></div>
+  <div class="card"><h3>Revenue by city</h3><canvas id="c-city"></canvas></div>
+  <div class="card"><h3>Order count by status</h3><canvas id="c-status"></canvas></div>
+  <div class="card"><h3>Top 5 products by revenue</h3>
+    <table><thead><tr><th>Product</th><th>Orders</th><th>Revenue</th></tr></thead><tbody id="top"></tbody></table>
+  </div>
+</div>
+
+<script>
+const inr = n => "₹" + Math.round(n).toLocaleString("en-IN");
+const PALETTE = ["#4f46e5","#06b6d4","#f59e0b","#10b981","#ef4444","#8b5cf6","#ec4899"];
+const STATUS_COLORS = {Completed:"#10b981", Returned:"#f59e0b", Cancelled:"#ef4444"};
+const ids = ["start","end","category","segment","city","status"];
+const charts = {};
+
+function draw(id, type, labels, data, colors, label, horizontal=false) {
+  if (charts[id]) charts[id].destroy();
+  charts[id] = new Chart(document.getElementById(id), {
+    type,
+    data: { labels, datasets: [{ label, data, backgroundColor: colors,
+                                 borderColor: type === "line" ? colors : undefined,
+                                 tension: .3, fill: type === "line" }] },
+    options: { indexAxis: horizontal ? "y" : "x", responsive: true,
+      plugins: { legend: { display: type === "doughnut" } },
+      scales: type === "doughnut" ? {} : { y: { beginAtZero: true } } }
+  });
+}
+
+function params() {
+  const p = new URLSearchParams();
+  ids.forEach(i => { const v = document.getElementById(i).value; if (v) p.set(i, v); });
+  return p.toString();
+}
+
+async function refresh() {
+  const d = await (await fetch("/api/dashboard?" + params())).json();
+  const k = d.kpi;
+  document.getElementById("k-rev").textContent = inr(k.revenue);
+  document.getElementById("k-ord").textContent = k.total_orders;
+  document.getElementById("k-act").textContent = k.active_orders + " non-cancelled";
+  document.getElementById("k-cus").textContent = k.unique_customers;
+  document.getElementById("k-aov").textContent = inr(k.avg_order_value);
+  document.getElementById("k-rep").textContent = k.repeat_customers;
+
+  draw("c-month", "line", d.monthly.map(r => r.label), d.monthly.map(r => r.revenue), "#4f46e5", "Revenue (₹)");
+  draw("c-cat", "bar", d.category.map(r => r.label), d.category.map(r => r.revenue), PALETTE, "Revenue (₹)");
+  draw("c-seg", "doughnut", d.segment.map(r => r.label), d.segment.map(r => r.revenue), PALETTE, "Revenue (₹)");
+  draw("c-city", "bar", d.city.map(r => r.label), d.city.map(r => r.revenue), "#06b6d4", "Revenue (₹)", true);
+  draw("c-status", "bar", d.status.map(r => r.label), d.status.map(r => r.orders),
+       d.status.map(r => STATUS_COLORS[r.label]), "Orders");
+  document.getElementById("top").innerHTML = d.top_products
+    .map(r => `<tr><td>${r.label}</td><td>${r.orders}</td><td>${inr(r.revenue)}</td></tr>`).join("");
+}
+
+function fill(id, values) {
+  const s = document.getElementById(id);
+  s.innerHTML = '<option value="">All</option>' + values.map(v => `<option>${v}</option>`).join("");
+}
+
+async function init() {
+  const f = await (await fetch("/api/filters")).json();
+  fill("category", f.categories); fill("segment", f.segments);
+  fill("city", f.cities); fill("status", f.statuses);
+  ["start", "end"].forEach(i => { const e = document.getElementById(i); e.min = f.min_date; e.max = f.max_date; });
+  ids.forEach(i => document.getElementById(i).addEventListener("change", refresh));
+  document.getElementById("reset").onclick = () => { ids.forEach(i => document.getElementById(i).value = ""); refresh(); };
+  refresh();
+}
+init();
+</script>
+</body>
+</html>
